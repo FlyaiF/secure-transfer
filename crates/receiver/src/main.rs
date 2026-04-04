@@ -161,8 +161,7 @@ fn write_private_key(path: &PathBuf, content: &str) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
-        fs::write(path, content)
-            .with_context(|| format!("failed to write {}", path.display()))?;
+        fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))?;
         Ok(())
     }
 }
@@ -218,12 +217,18 @@ fn build_ffmpeg_args(width: u32, height: u32, fps: u32) -> Result<Vec<String>> {
     };
 
     Ok(vec![
-        "-f".into(), input_fmt,
-        "-framerate".into(), fps_str,
-        "-i".into(), input_src,
-        "-vf".into(), scale,
-        "-f".into(), "rawvideo".into(),
-        "-pix_fmt".into(), "bgra".into(),
+        "-f".into(),
+        input_fmt,
+        "-framerate".into(),
+        fps_str,
+        "-i".into(),
+        input_src,
+        "-vf".into(),
+        scale,
+        "-f".into(),
+        "rawvideo".into(),
+        "-pix_fmt".into(),
+        "bgra".into(),
         "pipe:1".into(),
     ])
 }
@@ -267,7 +272,7 @@ fn receive_pipe<R: Read>(
         }
 
         frame_num += 1;
-        if every > 1 && frame_num % every != 0 {
+        if every > 1 && !frame_num.is_multiple_of(every) {
             continue;
         }
 
@@ -352,7 +357,8 @@ impl DecodeState {
         // Reject frames from a different transfer (e.g. sender restarted with different file)
         let expected_enc_size = self.encrypted_size.unwrap();
         let expected_blocks = self.decoder.as_ref().unwrap().total_blocks() as u16;
-        if frame.encrypted_size != expected_enc_size || frame.block.total_blocks != expected_blocks {
+        if frame.encrypted_size != expected_enc_size || frame.block.total_blocks != expected_blocks
+        {
             // Silently skip mismatched frames
             return None;
         }
@@ -432,9 +438,9 @@ fn bgra_to_gray(bgra: &[u8], w: u32, h: u32) -> GrayImage {
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
-    if path.starts_with("~/") {
+    if let Some(stripped) = path.strip_prefix("~/") {
         if let Some(home) = dirs_path() {
-            return home.join(&path[2..]);
+            return home.join(stripped);
         }
     }
     PathBuf::from(path)
