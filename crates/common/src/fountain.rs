@@ -26,7 +26,7 @@ pub const MAX_PAYLOAD_SIZE: usize = u16::MAX as usize * BLOCK_SIZE;
 /// Split data into source blocks of BLOCK_SIZE, padding the last block with zeros.
 /// Returns an error if the data exceeds MAX_PAYLOAD_SIZE.
 pub fn split_into_blocks(data: &[u8]) -> Result<Vec<Vec<u8>>, String> {
-    let block_count = (data.len() + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    let block_count = data.len().div_ceil(BLOCK_SIZE);
     if block_count > u16::MAX as usize {
         return Err(format!(
             "payload too large: {} bytes ({} blocks) exceeds maximum {} bytes ({} blocks)",
@@ -295,7 +295,7 @@ mod tests {
         while !decoder.is_complete() {
             let block = encode_block(&source_blocks, seed);
             // Only use even seeds (simulate 50% frame drop)
-            if seed % 2 == 0 {
+            if seed.is_multiple_of(2) {
                 decoder.add_block(&block);
             }
             seed += 1;

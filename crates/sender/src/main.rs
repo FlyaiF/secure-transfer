@@ -60,7 +60,9 @@ fn main() -> Result<()> {
 
 fn send_file(path: &str, pubkey_b64: &str, fps: f64, ec_level: &str) -> Result<()> {
     // Decode public key
-    let pubkey_bytes = BASE64.decode(pubkey_b64).context("invalid base64 public key")?;
+    let pubkey_bytes = BASE64
+        .decode(pubkey_b64)
+        .context("invalid base64 public key")?;
     let pubkey: [u8; 32] = pubkey_bytes
         .try_into()
         .map_err(|_| anyhow::anyhow!("public key must be 32 bytes"))?;
@@ -136,8 +138,13 @@ fn run_display_loop(
         let frame_data = encode_frame(&block, encrypted_size);
 
         // Encode as QR code
-        let code = QrCode::with_error_correction_level(&frame_data, ec)
-            .with_context(|| format!("QR encode failed for seed {} ({} bytes payload)", seed, frame_data.len()))?;
+        let code = QrCode::with_error_correction_level(&frame_data, ec).with_context(|| {
+            format!(
+                "QR encode failed for seed {} ({} bytes payload)",
+                seed,
+                frame_data.len()
+            )
+        })?;
 
         // Render to terminal
         render_qr_terminal(stdout, &code, seed, k)?;
@@ -156,7 +163,7 @@ fn render_qr_terminal(stdout: &mut io::Stdout, code: &QrCode, seed: u32, k: usiz
     let colors: Vec<Vec<bool>> = (0..width)
         .map(|y| {
             (0..width)
-                .map(|x| code[(x as usize, y as usize)] == qrcode::Color::Dark)
+                .map(|x| code[(x, y)] == qrcode::Color::Dark)
                 .collect()
         })
         .collect();
@@ -165,7 +172,7 @@ fn render_qr_terminal(stdout: &mut io::Stdout, code: &QrCode, seed: u32, k: usiz
 
     // QR needs width/2 + 2 columns (quiet zone), height/2 + 2 rows
     let qr_cols = width as u16 + 4; // 2 quiet zone on each side
-    let qr_rows = ((width + 1) / 2) as u16 + 3; // half-block + quiet zone + status line
+    let qr_rows = width.div_ceil(2) as u16 + 3; // half-block + quiet zone + status line
 
     let start_col = term_w.saturating_sub(qr_cols) / 2;
     let start_row = term_h.saturating_sub(qr_rows) / 2;
@@ -180,14 +187,13 @@ fn render_qr_terminal(stdout: &mut io::Stdout, code: &QrCode, seed: u32, k: usiz
         // Quiet zone left
         stdout.queue(style::PrintStyledContent("  ".on_white()))?;
 
-        for col in 0..width {
-            let top = colors[row_pair][col];
-            let bottom = if row_pair + 1 < width {
-                colors[row_pair + 1][col]
-            } else {
-                false // quiet zone for odd-height QR
-            };
-
+        let empty_row = vec![false; width];
+        let bottom_row = if row_pair + 1 < width {
+            &colors[row_pair + 1]
+        } else {
+            &empty_row
+        };
+        for (&top, &bottom) in colors[row_pair].iter().zip(bottom_row.iter()) {
             let ch = match (top, bottom) {
                 (true, true) => "█".black().on_black(),
                 (true, false) => "▀".black().on_white(),
@@ -208,18 +214,17 @@ fn render_qr_terminal(stdout: &mut io::Stdout, code: &QrCode, seed: u32, k: usiz
     stdout.queue(style::PrintStyledContent(quiet_line.as_str().on_white()))?;
 
     // Quiet zone bottom
-    let bottom_row = start_row + ((width + 1) / 2) as u16 + 1;
+    let bottom_row = start_row + width.div_ceil(2) as u16 + 1;
     stdout.queue(cursor::MoveTo(start_col, bottom_row))?;
     let quiet_line = " ".repeat(qr_cols as usize);
     stdout.queue(style::PrintStyledContent(quiet_line.as_str().on_white()))?;
 
     // Status line at bottom
-    let status = format!(
-        " Seed: {} | Blocks: {} | Press 'q' to quit ",
-        seed, k
-    );
+    let status = format!(" Seed: {} | Blocks: {} | Press 'q' to quit ", seed, k);
     stdout.queue(cursor::MoveTo(0, term_h - 1))?;
-    stdout.queue(style::PrintStyledContent(status.as_str().white().on_dark_blue()))?;
+    stdout.queue(style::PrintStyledContent(
+        status.as_str().white().on_dark_blue(),
+    ))?;
 
     stdout.flush()?;
     Ok(())
