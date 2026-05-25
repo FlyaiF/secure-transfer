@@ -2,8 +2,8 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashSet;
 
-/// Block size in bytes for fountain encoding.
-pub const BLOCK_SIZE: usize = 128;
+/// Default block size in bytes for fountain encoding. Used when no value is specified.
+pub const DEFAULT_BLOCK_SIZE: usize = 128;
 
 /// Robust Soliton distribution parameters.
 const C_SOLITON: f64 = 0.1;
@@ -20,40 +20,47 @@ pub struct EncodedBlock {
     pub data: Vec<u8>,
 }
 
-/// Maximum supported payload size (u16::MAX blocks * BLOCK_SIZE = ~8 MiB).
-pub const MAX_PAYLOAD_SIZE: usize = u16::MAX as usize * BLOCK_SIZE;
+/// Maximum supported payload size for a given block size (u16::MAX blocks).
+pub fn max_payload_size(block_size: usize) -> usize {
+    u16::MAX as usize * block_size
+}
 
-/// Split data into source blocks of BLOCK_SIZE, padding the last block with zeros.
-/// Returns an error if the data exceeds MAX_PAYLOAD_SIZE.
-pub fn split_into_blocks(data: &[u8]) -> Result<Vec<Vec<u8>>, String> {
-    let block_count = data.len().div_ceil(BLOCK_SIZE);
+/// Split data into source blocks of `block_size`, padding the last block with zeros.
+/// Returns an error if `block_size` is zero or the data exceeds the block-count limit.
+pub fn split_into_blocks(data: &[u8], block_size: usize) -> Result<Vec<Vec<u8>>, String> {
+    if block_size == 0 {
+        return Err("block_size must be greater than 0".to_string());
+    }
+    let block_count = data.len().div_ceil(block_size);
     if block_count > u16::MAX as usize {
         return Err(format!(
-            "payload too large: {} bytes ({} blocks) exceeds maximum {} bytes ({} blocks)",
+            "payload too large: {} bytes ({} blocks) exceeds maximum {} bytes ({} blocks) at block_size={}",
             data.len(),
             block_count,
-            MAX_PAYLOAD_SIZE,
-            u16::MAX
+            max_payload_size(block_size),
+            u16::MAX,
+            block_size,
         ));
     }
     let mut blocks = Vec::new();
-    for chunk in data.chunks(BLOCK_SIZE) {
+    for chunk in data.chunks(block_size) {
         let mut block = chunk.to_vec();
-        block.resize(BLOCK_SIZE, 0);
+        block.resize(block_size, 0);
         blocks.push(block);
     }
     if blocks.is_empty() {
-        blocks.push(vec![0u8; BLOCK_SIZE]);
+        blocks.push(vec![0u8; block_size]);
     }
     Ok(blocks)
 }
 
 /// Generate a fountain-encoded block from source blocks using the given seed.
-pub fn encode_block(source_blocks: &[Vec<u8>], seed: u32) -> EncodedBlock {
+/// Caller must ensure every block in `source_blocks` has length `block_size`.
+pub fn encode_block(source_blocks: &[Vec<u8>], seed: u32, block_size: usize) -> EncodedBlock {
     let k = source_blocks.len();
     let indices = select_indices(seed, k);
 
-    let mut data = vec![0u8; BLOCK_SIZE];
+    let mut data = vec![0u8; block_size];
     for &idx in &indices {
         xor_into(&mut data, &source_blocks[idx]);
     }
@@ -68,6 +75,7 @@ pub fn encode_block(source_blocks: &[Vec<u8>], seed: u32) -> EncodedBlock {
 /// Fountain decoder using belief propagation (peeling).
 pub struct Decoder {
     k: usize,
+    block_size: usize,
     decoded: Vec<Option<Vec<u8>>>,
     /// Buffered encoded blocks not yet fully resolved: (remaining_indices, data)
     buffer: Vec<(HashSet<usize>, Vec<u8>)>,
@@ -76,10 +84,11 @@ pub struct Decoder {
 }
 
 impl Decoder {
-    pub fn new(total_blocks: u16) -> Self {
+    pub fn new(total_blocks: u16, block_size: usize) -> Self {
         let k = total_blocks as usize;
         Decoder {
             k,
+            block_size,
             decoded: vec![None; k],
             buffer: Vec::new(),
             decoded_count: 0,
@@ -97,14 +106,23 @@ impl Decoder {
         self.k
     }
 
+    /// Block size in bytes this decoder was initialized with.
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
     /// Returns true if all source blocks have been decoded.
     pub fn is_complete(&self) -> bool {
         self.decoded_count == self.k
     }
 
     /// Add an encoded block and attempt to decode. Returns true if new source blocks were decoded.
+    /// Blocks whose payload length doesn't match the decoder's `block_size` are rejected.
     pub fn add_block(&mut self, block: &EncodedBlock) -> bool {
         if self.is_complete() {
+            return false;
+        }
+        if block.data.len() != self.block_size {
             return false;
         }
         if !self.seen_seeds.insert(block.seed) {
@@ -173,7 +191,7 @@ impl Decoder {
         if !self.is_complete() {
             return None;
         }
-        let mut result = Vec::with_capacity(self.k * BLOCK_SIZE);
+        let mut result = Vec::with_capacity(self.k * self.block_size);
         for block in &self.decoded {
             result.extend_from_slice(block.as_ref().unwrap());
         }
@@ -256,15 +274,16 @@ mod tests {
     #[test]
     fn test_fountain_roundtrip() {
         let data = b"The quick brown fox jumps over the lazy dog. This is a test of the fountain code system with enough data to span multiple blocks for proper testing purposes.";
-        let source_blocks = split_into_blocks(data).unwrap();
+        let bs = DEFAULT_BLOCK_SIZE;
+        let source_blocks = split_into_blocks(data, bs).unwrap();
         let k = source_blocks.len();
 
-        let mut decoder = Decoder::new(k as u16);
+        let mut decoder = Decoder::new(k as u16, bs);
         let mut seed = 0u32;
 
         // Generate encoded blocks until decoding succeeds
         while !decoder.is_complete() {
-            let block = encode_block(&source_blocks, seed);
+            let block = encode_block(&source_blocks, seed, bs);
             decoder.add_block(&block);
             seed += 1;
             if seed > (k as u32) * 20 {
@@ -285,15 +304,16 @@ mod tests {
     #[test]
     fn test_fountain_skip_blocks() {
         // Simulate frame drops: only use every other encoded block
-        let data = vec![42u8; BLOCK_SIZE * 10]; // 10 blocks
-        let source_blocks = split_into_blocks(&data).unwrap();
+        let bs = DEFAULT_BLOCK_SIZE;
+        let data = vec![42u8; bs * 10]; // 10 blocks
+        let source_blocks = split_into_blocks(&data, bs).unwrap();
         let k = source_blocks.len();
 
-        let mut decoder = Decoder::new(k as u16);
+        let mut decoder = Decoder::new(k as u16, bs);
         let mut seed = 0u32;
 
         while !decoder.is_complete() {
-            let block = encode_block(&source_blocks, seed);
+            let block = encode_block(&source_blocks, seed, bs);
             // Only use even seeds (simulate 50% frame drop)
             if seed.is_multiple_of(2) {
                 decoder.add_block(&block);
@@ -306,5 +326,36 @@ mod tests {
 
         let result = decoder.reassemble(data.len()).unwrap();
         assert_eq!(result, data);
+    }
+
+    #[test]
+    fn test_fountain_custom_block_size() {
+        let bs = 1024;
+        let data: Vec<u8> = (0..bs * 4).map(|i| (i % 256) as u8).collect();
+        let source_blocks = split_into_blocks(&data, bs).unwrap();
+        let k = source_blocks.len();
+
+        let mut decoder = Decoder::new(k as u16, bs);
+        let mut seed = 0u32;
+        while !decoder.is_complete() {
+            let block = encode_block(&source_blocks, seed, bs);
+            decoder.add_block(&block);
+            seed += 1;
+            if seed > (k as u32) * 20 {
+                panic!("too many blocks needed");
+            }
+        }
+        assert_eq!(decoder.reassemble(data.len()).unwrap(), data);
+    }
+
+    #[test]
+    fn test_decoder_rejects_mismatched_block_size() {
+        let mut decoder = Decoder::new(4, 128);
+        let bad = EncodedBlock {
+            seed: 1,
+            total_blocks: 4,
+            data: vec![0u8; 256],
+        };
+        assert!(!decoder.add_block(&bad));
     }
 }

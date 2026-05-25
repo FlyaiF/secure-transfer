@@ -2,7 +2,7 @@ use image::GrayImage;
 use qrcode::QrCode;
 
 use transfer_common::crypto;
-use transfer_common::fountain::{encode_block, split_into_blocks, Decoder, BLOCK_SIZE};
+use transfer_common::fountain::{encode_block, split_into_blocks, Decoder, DEFAULT_BLOCK_SIZE};
 use transfer_common::protocol::{decode_frame, encode_frame};
 
 /// Render a QR code to a grayscale image for testing.
@@ -48,23 +48,33 @@ fn decode_qr(image: &GrayImage) -> Option<Vec<u8>> {
 #[test]
 fn test_full_pipeline_small_file() {
     let original_data = b"Hello, visual transfer! This is a small test file.";
-    full_pipeline_test(original_data);
+    full_pipeline_test(original_data, DEFAULT_BLOCK_SIZE);
 }
 
 #[test]
 fn test_full_pipeline_exact_block_size() {
-    let original_data = vec![0x42u8; BLOCK_SIZE];
-    full_pipeline_test(&original_data);
+    let original_data = vec![0x42u8; DEFAULT_BLOCK_SIZE];
+    full_pipeline_test(&original_data, DEFAULT_BLOCK_SIZE);
 }
 
 #[test]
 fn test_full_pipeline_multi_block() {
     // ~5 blocks worth of data
-    let original_data: Vec<u8> = (0..BLOCK_SIZE * 5).map(|i| (i % 256) as u8).collect();
-    full_pipeline_test(&original_data);
+    let original_data: Vec<u8> = (0..DEFAULT_BLOCK_SIZE * 5)
+        .map(|i| (i % 256) as u8)
+        .collect();
+    full_pipeline_test(&original_data, DEFAULT_BLOCK_SIZE);
 }
 
-fn full_pipeline_test(original_data: &[u8]) {
+#[test]
+fn test_full_pipeline_large_block_size() {
+    // 8x default block size, multi-block payload
+    let bs = 1024;
+    let original_data: Vec<u8> = (0..bs * 3).map(|i| (i % 256) as u8).collect();
+    full_pipeline_test(&original_data, bs);
+}
+
+fn full_pipeline_test(original_data: &[u8], block_size: usize) {
     // 1. Generate keypair
     let (privkey, pubkey) = crypto::keygen();
 
@@ -73,18 +83,18 @@ fn full_pipeline_test(original_data: &[u8]) {
     let encrypted_size = encrypted.len() as u32;
 
     // 3. Split into fountain source blocks
-    let source_blocks = split_into_blocks(&encrypted).unwrap();
+    let source_blocks = split_into_blocks(&encrypted, block_size).unwrap();
     let k = source_blocks.len();
 
     // 4. Encode → QR → image → decode QR → fountain decode
-    let mut decoder = Decoder::new(k as u16);
+    let mut decoder = Decoder::new(k as u16, block_size);
     let mut seed = 0u32;
     let mut qr_success = 0u32;
 
     while !decoder.is_complete() {
         // Generate fountain block
-        let block = encode_block(&source_blocks, seed);
-        let frame_data = encode_frame(&block, encrypted_size);
+        let block = encode_block(&source_blocks, seed, block_size);
+        let frame_data = encode_frame(&block, encrypted_size).expect("encode_frame");
 
         // Encode to QR
         let code = QrCode::with_error_correction_level(&frame_data, qrcode::EcLevel::M)
@@ -98,6 +108,7 @@ fn full_pipeline_test(original_data: &[u8]) {
             // Parse protocol frame
             if let Some(frame) = decode_frame(&decoded_data) {
                 assert_eq!(frame.encrypted_size, encrypted_size);
+                assert_eq!(frame.block_size, block_size as u16);
                 assert_eq!(frame.block.total_blocks, k as u16);
                 assert_eq!(frame.block.seed, seed);
                 decoder.add_block(&frame.block);

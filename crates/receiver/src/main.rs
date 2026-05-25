@@ -347,17 +347,24 @@ impl DecodeState {
 
         if self.decoder.is_none() {
             eprintln!(
-                "First frame received! {} source blocks, {} bytes encrypted",
-                frame.block.total_blocks, frame.encrypted_size
+                "First frame received! {} source blocks, {} bytes encrypted, block size {}",
+                frame.block.total_blocks, frame.encrypted_size, frame.block_size
             );
-            self.decoder = Some(Decoder::new(frame.block.total_blocks));
+            self.decoder = Some(Decoder::new(
+                frame.block.total_blocks,
+                frame.block_size as usize,
+            ));
             self.encrypted_size = Some(frame.encrypted_size);
         }
 
-        // Reject frames from a different transfer (e.g. sender restarted with different file)
+        // Reject frames from a different transfer (e.g. sender restarted with different file or block size)
         let expected_enc_size = self.encrypted_size.unwrap();
-        let expected_blocks = self.decoder.as_ref().unwrap().total_blocks() as u16;
-        if frame.encrypted_size != expected_enc_size || frame.block.total_blocks != expected_blocks
+        let dec_ref = self.decoder.as_ref().unwrap();
+        let expected_blocks = dec_ref.total_blocks() as u16;
+        let expected_block_size = dec_ref.block_size() as u16;
+        if frame.encrypted_size != expected_enc_size
+            || frame.block.total_blocks != expected_blocks
+            || frame.block_size != expected_block_size
         {
             // Silently skip mismatched frames
             return None;

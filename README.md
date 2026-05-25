@@ -101,8 +101,12 @@ diff /tmp/test.txt /tmp/received.txt
 
 ```
 transfer-sender send <FILE> --pubkey <BASE64>
-    --fps <N>       Frames per second (default: 2)
-    --ec <LEVEL>    QR error correction: L, M, Q, H (default: M)
+    --fps <N>           Frames per second (default: 2)
+    --ec <LEVEL>        QR error correction: L, M, Q, H (default: M)
+    --block-size <N>    Fountain block size in bytes (default: 128).
+                        Larger values pack more data per QR but produce
+                        denser codes that need higher-resolution scanning.
+                        Receiver auto-adapts from the frame header.
 ```
 
 ### Receiver
@@ -152,8 +156,8 @@ For manual control, use `receiver pipe` and run ffmpeg yourself.
 
 ## Technical Details
 
-- Block size: 128 bytes per fountain source block
-- Protocol header: 13 bytes per QR frame
+- Block size: 128 bytes per fountain source block (default; tunable via `--block-size`)
+- Protocol header: 15 bytes per QR frame
 - Encryption overhead: 60 bytes total (32B ephemeral pubkey + 12B nonce + 16B GCM tag)
 - Typical QR version: 10-15 (auto-selected based on payload size)
 - Fountain overhead: ~5-10% more blocks than source blocks needed
