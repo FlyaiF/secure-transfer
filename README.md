@@ -10,7 +10,7 @@ No direct network connection needed between the machines — if you can see the 
 - **End-to-end encryption** — X25519 ECDH + AES-256-GCM with forward secrecy
 - **Terminal QR rendering** — works in any terminal, no GUI required
 - **Cross-platform** — pure Rust, builds on Linux / macOS / Windows
-- **Built-in screen capture** — auto-spawns ffmpeg, no manual piping
+- **Built-in screen + window capture** — in-process via [`xcap`](https://crates.io/crates/xcap), no external tools required
 
 ## How It Works
 
@@ -36,7 +36,7 @@ cargo build --release
 
 Binaries are at `target/release/transfer-sender` and `target/release/transfer-receiver`.
 
-No native library dependencies. Just needs `ffmpeg` installed on the receiving machine.
+No external runtime dependencies. Screen and window capture run in-process; ffmpeg is **not** required.
 
 ## Usage
 
@@ -65,17 +65,23 @@ Open whatever shows the remote screen (RDP, VNC, video call), then:
 ./transfer-receiver screen --privkey ~/.transfer_key -o received.pdf
 ```
 
-The receiver auto-launches ffmpeg, captures your screen, finds the QR codes, and shows progress:
+The receiver captures your screen in-process, finds the QR codes, and shows progress:
 
 ```
-Starting ffmpeg: ffmpeg -f x11grab -framerate 5 -i :0 -vf scale=1280:720 -f rawvideo -pix_fmt bgra pipe:1
-First frame received! 42 source blocks, 5440 bytes encrypted
+Capturing monitor 'Built-in Retina Display' (3024x1964) → decoding at 1280x720
+First frame received! 42 source blocks, 5440 bytes encrypted, block size 128
 Received: 45 unique | Decoded: 42/42 (100%) | 14.8s
 All blocks received!
 File saved to: received.pdf (5120 bytes)
 ```
 
 Done. Three commands total.
+
+To capture just one window (e.g. the remote-desktop client) instead of the whole monitor:
+
+```bash
+./transfer-receiver window --privkey ~/.transfer_key --title "Remote Session" -o received.pdf
+```
 
 ## Same-Machine Quick Test
 
@@ -115,14 +121,24 @@ transfer-sender send <FILE> --pubkey <BASE64>
 # Generate keypair
 transfer-receiver keygen [--out <PATH>]
 
-# Capture screen automatically (spawns ffmpeg internally)
+# Capture a monitor in-process (no ffmpeg)
 transfer-receiver screen --privkey <PATH> [-o <FILE>]
-    --width <W>     Capture width (default: 1280)
-    --height <H>    Capture height (default: 720)
-    --fps <N>       Capture framerate (default: 5)
-    --every <N>     Decode every Nth frame (default: 1)
+    --monitor <SEL>  Index (0, 1, ...) or name substring; default: primary
+    --width <W>      Downscale to this width before decode (default: 1280)
+    --height <H>     Downscale to this height before decode (default: 720)
+    --fps <N>        Target framerate hint (default: 5)
+    --every <N>      Decode every Nth frame (default: 1)
 
-# Manual pipe mode (if you want to control ffmpeg yourself)
+# Capture a specific window in-process (no ffmpeg)
+transfer-receiver window --privkey <PATH> [-o <FILE>]
+    --title <STR>    Window title substring (case-insensitive)
+    --id <N>         Exact window id (alternative to --title)
+    --width <W>      Downscale to this width before decode (default: 1280)
+    --height <H>     Downscale to this height before decode (default: 720)
+    --fps <N>        Polling framerate (default: 5)
+    --every <N>      Decode every Nth frame (default: 1)
+
+# Manual pipe mode (escape hatch: feed your own raw BGRA frames over stdin)
 transfer-receiver pipe --privkey <PATH> --width <W> --height <H> [-o <FILE>]
     --every <N>     Decode every Nth frame (default: 1)
 
@@ -135,16 +151,17 @@ transfer-receiver decode --privkey <PATH> -o <FILE> <IMAGES...>
 - **Slow connection?** Lower `--fps 1` on the sender for bigger QR codes per frame
 - **Bad video quality?** Use `--ec H` on the sender for max error correction
 - **High CPU on receiver?** Use `--every 3` to only decode every 3rd frame
-- **No ffmpeg?** Take screenshots manually and use `receiver decode` mode
+- **Just one window?** Use `receiver window --title "…"` instead of full-screen capture
+- **Multi-monitor?** Pass `receiver screen --monitor 1` (or a name substring)
+- **Edge cases?** Use `receiver pipe` to feed raw BGRA frames from any source, or `receiver decode` for saved screenshots
 
 ## Platform Notes
 
-The receiver auto-detects your platform for ffmpeg:
-- **Linux**: uses `-f x11grab` (X11). Wayland falls back to XWayland.
-- **macOS**: uses `-f avfoundation`
-- **Windows**: uses `-f gdigrab`
-
-For manual control, use `receiver pipe` and run ffmpeg yourself.
+Screen and window capture use [`xcap`](https://crates.io/crates/xcap):
+- **macOS**: ScreenCaptureKit / AVFoundation
+- **Windows**: Windows Graphics Capture (≥ Windows 8.1)
+- **Linux X11**: native, including window capture
+- **Linux Wayland**: not supported for direct capture — use `receiver pipe` with a Wayland-aware grabber (e.g. `wf-recorder`, `grim`)
 
 ## Security
 
@@ -165,6 +182,6 @@ For manual control, use `receiver pipe` and run ffmpeg yourself.
 
 ## Requirements
 
-- **Rust 1.70+** to build
-- **ffmpeg** on the receiving machine (for `screen` and `pipe` modes)
+- **Rust 1.88+** to build (driven by transitive deps of `xcap`/`image`)
+- No external runtime dependencies — `screen` and `window` modes capture in-process
 - Any screen-sharing tool to see the remote terminal (RDP, VNC, SSH+tmux, video call, etc.)

@@ -1,18 +1,17 @@
 use std::fs;
-use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use clap::{Parser, Subcommand};
-use image::GrayImage;
 
 use transfer_common::crypto;
-use transfer_common::fountain::Decoder;
-use transfer_common::protocol;
+
+mod capture;
+mod decode;
+
+use decode::{run_pipe_decode, DecodeState};
 
 #[derive(Parser)]
 #[command(name = "receiver", about = "Visual data transfer - receiver side")]
@@ -30,7 +29,7 @@ enum Commands {
         out: String,
     },
 
-    /// Receive by capturing the screen (auto-detects platform, uses ffmpeg)
+    /// Receive by capturing a monitor (in-process, no ffmpeg required)
     Screen {
         /// Path to the private key file
         #[arg(long)]
@@ -40,15 +39,55 @@ enum Commands {
         #[arg(long, short)]
         output: Option<String>,
 
-        /// Capture resolution width
+        /// Monitor selector: an index (0, 1, …) or a name substring.
+        /// Defaults to the primary monitor.
+        #[arg(long)]
+        monitor: Option<String>,
+
+        /// Downscale captured frames to this width before QR decode
         #[arg(long, default_value = "1280")]
         width: u32,
 
-        /// Capture resolution height
+        /// Downscale captured frames to this height before QR decode
         #[arg(long, default_value = "720")]
         height: u32,
 
-        /// Capture framerate
+        /// Target capture framerate (hint to the OS)
+        #[arg(long, default_value = "5")]
+        fps: u32,
+
+        /// Only decode every Nth frame (reduce CPU)
+        #[arg(long, default_value = "1")]
+        every: u32,
+    },
+
+    /// Receive by capturing a specific window (in-process, no ffmpeg required)
+    Window {
+        /// Path to the private key file
+        #[arg(long)]
+        privkey: String,
+
+        /// Output file path
+        #[arg(long, short)]
+        output: Option<String>,
+
+        /// Window title substring to match (case-insensitive)
+        #[arg(long, conflicts_with = "id")]
+        title: Option<String>,
+
+        /// Exact window id (from `xcap`'s enumeration)
+        #[arg(long)]
+        id: Option<u32>,
+
+        /// Downscale captured frames to this width before QR decode
+        #[arg(long, default_value = "1280")]
+        width: u32,
+
+        /// Downscale captured frames to this height before QR decode
+        #[arg(long, default_value = "720")]
+        height: u32,
+
+        /// Capture framerate (xcap doesn't stream windows yet, so we poll)
         #[arg(long, default_value = "5")]
         fps: u32,
 
@@ -102,11 +141,22 @@ fn main() -> Result<()> {
         Commands::Screen {
             privkey,
             output,
+            monitor,
             width,
             height,
             fps,
             every,
-        } => receive_screen(&privkey, output, width, height, fps, every),
+        } => capture::receive_screen(&privkey, output, monitor, width, height, fps, every),
+        Commands::Window {
+            privkey,
+            output,
+            title,
+            id,
+            width,
+            height,
+            fps,
+            every,
+        } => capture::receive_window(&privkey, output, title, id, width, height, fps, every),
         Commands::Pipe {
             privkey,
             output,
@@ -161,76 +211,11 @@ fn write_private_key(path: &PathBuf, content: &str) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
+        // Best-effort on Windows: write the file plainly.
+        let _ = content;
         fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))?;
         Ok(())
     }
-}
-
-// ─── Screen capture via ffmpeg ──────────────────────────────────────────────
-
-fn receive_screen(
-    privkey_path: &str,
-    output: Option<String>,
-    width: u32,
-    height: u32,
-    fps: u32,
-    every: u32,
-) -> Result<()> {
-    // Build platform-specific ffmpeg command
-    let ffmpeg_args = build_ffmpeg_args(width, height, fps)?;
-
-    eprintln!("Starting ffmpeg: ffmpeg {}", ffmpeg_args.join(" "));
-
-    let mut child = Command::new("ffmpeg")
-        .args(&ffmpeg_args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("failed to start ffmpeg — is it installed and in PATH?")?;
-
-    let stdout = child.stdout.take().unwrap();
-    let result = receive_pipe(privkey_path, output, width, height, every, stdout);
-
-    // Clean up ffmpeg
-    let _ = child.kill();
-    let _ = child.wait();
-
-    result
-}
-
-fn build_ffmpeg_args(width: u32, height: u32, fps: u32) -> Result<Vec<String>> {
-    let scale = format!("scale={}:{}", width, height);
-    let fps_str = fps.to_string();
-
-    let (input_fmt, input_src) = if cfg!(target_os = "linux") {
-        let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into());
-        if std::env::var("WAYLAND_DISPLAY").is_ok() {
-            eprintln!("Detected Wayland, trying x11grab via XWayland...");
-        }
-        ("x11grab".to_string(), display)
-    } else if cfg!(target_os = "macos") {
-        ("avfoundation".to_string(), "1".to_string())
-    } else if cfg!(target_os = "windows") {
-        ("gdigrab".to_string(), "desktop".to_string())
-    } else {
-        anyhow::bail!("unsupported platform — use 'pipe' mode with manual ffmpeg command");
-    };
-
-    Ok(vec![
-        "-f".into(),
-        input_fmt,
-        "-framerate".into(),
-        fps_str,
-        "-i".into(),
-        input_src,
-        "-vf".into(),
-        scale,
-        "-f".into(),
-        "rawvideo".into(),
-        "-pix_fmt".into(),
-        "bgra".into(),
-        "pipe:1".into(),
-    ])
 }
 
 // ─── Pipe mode ──────────────────────────────────────────────────────────────
@@ -244,49 +229,8 @@ fn receive_pipe_stdin(
 ) -> Result<()> {
     let stdin = std::io::stdin().lock();
     eprintln!("Reading {}x{} BGRA frames from stdin...", width, height);
-    receive_pipe(privkey_path, output, width, height, every, stdin)
-}
-
-fn receive_pipe<R: Read>(
-    privkey_path: &str,
-    output: Option<String>,
-    width: u32,
-    height: u32,
-    every: u32,
-    mut reader: R,
-) -> Result<()> {
-    if width == 0 || height == 0 {
-        anyhow::bail!("--width and --height must be greater than 0");
-    }
-    let privkey = load_privkey(privkey_path)?;
-    let frame_size = (width as usize) * (height as usize) * 4;
-    let mut buf = vec![0u8; frame_size];
-    let mut state = DecodeState::new();
-    let mut frame_num = 0u32;
-    let start = Instant::now();
-
-    loop {
-        if reader.read_exact(&mut buf).is_err() {
-            eprintln!("\nEnd of input stream");
-            break;
-        }
-
-        frame_num += 1;
-        if every > 1 && !frame_num.is_multiple_of(every) {
-            continue;
-        }
-
-        let gray = bgra_to_gray(&buf, width, height);
-        if let Some(encrypted) = state.process_frame(&gray, start.elapsed()) {
-            return finalize(encrypted, &privkey, output);
-        }
-    }
-
-    anyhow::bail!(
-        "stream ended before transfer complete: {}/{} blocks decoded",
-        state.decoded_count(),
-        state.total_blocks()
-    );
+    let encrypted = run_pipe_decode(stdin, width, height, every)?;
+    finalize_transfer(encrypted, privkey_path, output)
 }
 
 // ─── File decode mode ───────────────────────────────────────────────────────
@@ -294,7 +238,7 @@ fn receive_pipe<R: Read>(
 fn decode_files(privkey_path: &str, output: &str, files: &[String]) -> Result<()> {
     let privkey = load_privkey(privkey_path)?;
     let mut state = DecodeState::new();
-    let start = Instant::now();
+    let start = std::time::Instant::now();
 
     for file in files {
         let img = image::open(file)
@@ -316,86 +260,21 @@ fn decode_files(privkey_path: &str, output: &str, files: &[String]) -> Result<()
     );
 }
 
-// ─── Shared decode logic ────────────────────────────────────────────────────
+// ─── Finalization ───────────────────────────────────────────────────────────
 
-struct DecodeState {
-    decoder: Option<Decoder>,
-    encrypted_size: Option<u32>,
-    unique_count: u32,
-}
-
-impl DecodeState {
-    fn new() -> Self {
-        Self {
-            decoder: None,
-            encrypted_size: None,
-            unique_count: 0,
-        }
-    }
-
-    fn decoded_count(&self) -> usize {
-        self.decoder.as_ref().map_or(0, |d| d.decoded_count())
-    }
-
-    fn total_blocks(&self) -> usize {
-        self.decoder.as_ref().map_or(0, |d| d.total_blocks())
-    }
-
-    fn process_frame(&mut self, gray: &GrayImage, elapsed: Duration) -> Option<Vec<u8>> {
-        let data = decode_qr_from_image(gray)?;
-        let frame = protocol::decode_frame(&data)?;
-
-        if self.decoder.is_none() {
-            eprintln!(
-                "First frame received! {} source blocks, {} bytes encrypted, block size {}",
-                frame.block.total_blocks, frame.encrypted_size, frame.block_size
-            );
-            self.decoder = Some(Decoder::new(
-                frame.block.total_blocks,
-                frame.block_size as usize,
-            ));
-            self.encrypted_size = Some(frame.encrypted_size);
-        }
-
-        // Reject frames from a different transfer (e.g. sender restarted with different file or block size)
-        let expected_enc_size = self.encrypted_size.unwrap();
-        let dec_ref = self.decoder.as_ref().unwrap();
-        let expected_blocks = dec_ref.total_blocks() as u16;
-        let expected_block_size = dec_ref.block_size() as u16;
-        if frame.encrypted_size != expected_enc_size
-            || frame.block.total_blocks != expected_blocks
-            || frame.block_size != expected_block_size
-        {
-            // Silently skip mismatched frames
-            return None;
-        }
-
-        let dec = self.decoder.as_mut().unwrap();
-        if dec.add_block(&frame.block) {
-            self.unique_count += 1;
-        }
-
-        eprint!(
-            "\rReceived: {} unique | Decoded: {}/{} ({:.0}%) | {:.1}s  ",
-            self.unique_count,
-            dec.decoded_count(),
-            dec.total_blocks(),
-            dec.decoded_count() as f64 / dec.total_blocks() as f64 * 100.0,
-            elapsed.as_secs_f64(),
-        );
-
-        if dec.is_complete() {
-            eprintln!("\nAll blocks received!");
-            let enc_size = self.encrypted_size.unwrap() as usize;
-            return dec.reassemble(enc_size);
-        }
-        None
-    }
+/// Shared entry point used by capture-driven modes.
+pub(crate) fn finalize_transfer(
+    encrypted: Vec<u8>,
+    privkey_path: &str,
+    output: Option<String>,
+) -> Result<()> {
+    let privkey = load_privkey(privkey_path)?;
+    finalize(encrypted, &privkey, output)
 }
 
 fn finalize(encrypted: Vec<u8>, privkey: &[u8; 32], output: Option<String>) -> Result<()> {
     eprintln!("Decrypting...");
-    let plaintext = crypto::decrypt(&encrypted, privkey)
+    let plaintext = crypto::decrypt(encrypted.as_slice(), privkey)
         .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
     let out_path = output.unwrap_or_else(|| "received_file".to_string());
     fs::write(&out_path, &plaintext)?;
@@ -415,33 +294,6 @@ fn load_privkey(path: &str) -> Result<[u8; 32]> {
     bytes
         .try_into()
         .map_err(|_| anyhow::anyhow!("private key must be 32 bytes"))
-}
-
-fn decode_qr_from_image(image: &GrayImage) -> Option<Vec<u8>> {
-    let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(
-        image.width() as usize,
-        image.height() as usize,
-        |x, y| image.get_pixel(x as u32, y as u32).0[0],
-    );
-    let grids = prepared.detect_grids();
-    for grid in grids {
-        let mut data = Vec::new();
-        if grid.decode_to(&mut data).is_ok() {
-            return Some(data);
-        }
-    }
-    None
-}
-
-fn bgra_to_gray(bgra: &[u8], w: u32, h: u32) -> GrayImage {
-    GrayImage::from_fn(w, h, |x, y| {
-        let i = ((y * w + x) * 4) as usize;
-        let b = bgra[i] as f32;
-        let g = bgra[i + 1] as f32;
-        let r = bgra[i + 2] as f32;
-        let luma = (0.299 * r + 0.587 * g + 0.114 * b) as u8;
-        image::Luma([luma])
-    })
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
