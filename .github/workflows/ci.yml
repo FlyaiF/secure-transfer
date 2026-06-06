@@ -25,6 +25,17 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libclang-dev \
+            libgbm-dev \
+            libpipewire-0.3-dev \
+            libwayland-dev \
+            libxcb1-dev
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -81,6 +92,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libclang-dev \
+            libgbm-dev \
+            libpipewire-0.3-dev \
+            libwayland-dev \
+            libxcb1-dev
 
       - name: Cache cargo
         uses: actions/cache@v4
