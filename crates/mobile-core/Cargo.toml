@@ -1,0 +1,14 @@
+[package]
+name = "transfer-mobile-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+base64 = "0.22"
+transfer-common = { path = "../common" }
+
+[dev-dependencies]
+qrcode = "0.14"

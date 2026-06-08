@@ -2907,6 +2907,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "transfer-mobile-core"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "qrcode",
+ "transfer-common",
+]
+
+[[package]]
 name = "transfer-receiver"
 version = "0.1.0"
 dependencies = [

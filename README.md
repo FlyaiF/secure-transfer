@@ -146,6 +146,22 @@ transfer-receiver pipe --privkey <PATH> --width <W> --height <H> [-o <FILE>]
 transfer-receiver decode --privkey <PATH> -o <FILE> <IMAGES...>
 ```
 
+### Android Mobile Receiver
+
+An Android-first Flutter receiver is being added under `apps/mobile_receiver`.
+The v1 direction is:
+
+- paste/type the receiver private key manually
+- scan sender QR frames with Android-native camera scanning
+- pass decoded QR payload bytes into Rust for protocol handling and decryption
+- save/share the received file from the Android app
+
+The Rust mobile receive core lives in `crates/mobile-core` and is covered by
+`cargo test --all`. The Android app builds the Rust core into native libraries
+for `armeabi-v7a`, `arm64-v8a`, and `x86_64` during `flutter build apk`. Real
+phone end-to-end transfer validation is still pending. See
+`docs/mobile-receiver-execplan.md`.
+
 ## Tips
 
 - **Slow connection?** Lower `--fps 1` on the sender for bigger QR codes per frame

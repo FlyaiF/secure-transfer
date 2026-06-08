@@ -14,6 +14,13 @@ pub fn keygen() -> ([u8; 32], [u8; 32]) {
     (secret.to_bytes(), *public.as_bytes())
 }
 
+/// Derive the public key that corresponds to a receiver private key.
+pub fn public_key_from_private(receiver_privkey: &[u8; 32]) -> [u8; 32] {
+    let secret = StaticSecret::from(*receiver_privkey);
+    let public = PublicKey::from(&secret);
+    *public.as_bytes()
+}
+
 /// Encrypt file data using receiver's public key.
 /// Returns encrypted blob: [ephemeral_pubkey_32B][nonce_12B][ciphertext+tag]
 pub fn encrypt(data: &[u8], receiver_pubkey: &[u8; 32]) -> Result<Vec<u8>, String> {
@@ -89,6 +96,12 @@ mod tests {
         let blob = encrypt(data, &pubkey).unwrap();
         let decrypted = decrypt(&blob, &privkey).unwrap();
         assert_eq!(decrypted, data);
+    }
+
+    #[test]
+    fn test_public_key_from_private_matches_keygen() {
+        let (privkey, pubkey) = keygen();
+        assert_eq!(public_key_from_private(&privkey), pubkey);
     }
 
     #[test]
